@@ -96,3 +96,112 @@
     (ok true)
   )
 )
+
+(define-public (update-btc-price-feed
+    (price uint)
+    (timestamp uint)
+  )
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+    (asserts! (> price u0) ERR-INVALID-AMOUNT)
+    (var-set btc-usd-price
+      (some {
+        price: price,
+        timestamp: timestamp,
+      })
+    )
+    (ok true)
+  )
+)
+
+(define-public (set-system-time (timestamp uint))
+  (begin
+    (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-UNAUTHORIZED)
+    (var-set system-timestamp timestamp)
+    (ok true)
+  )
+)
+
+;; CORE UTILITY FUNCTIONS
+
+(define-private (calculate-usd-value
+    (btc-amount uint)
+    (btc-price uint)
+  )
+  (* btc-amount btc-price)
+)
+
+(define-private (calculate-required-collateral
+    (debt-amount uint)
+    (btc-price uint)
+  )
+  (/ (* debt-amount MIN-COLLATERAL-RATIO) (/ btc-price u100))
+)
+
+(define-private (is-vault-healthy
+    (user principal)
+    (btc-price uint)
+  )
+  (match (map-get? vault-positions user)
+    vault (let (
+        (debt (get usd-debt vault))
+        (collateral (get btc-collateral vault))
+        (collateral-value (calculate-usd-value collateral btc-price))
+        (min-required-value (/ (* debt MIN-COLLATERAL-RATIO) u100))
+      )
+      (>= collateral-value min-required-value)
+    )
+    false
+  )
+)
+
+(define-private (calculate-accrued-interest
+    (principal uint)
+    (blocks-elapsed uint)
+  )
+  (/ (* principal (* blocks-elapsed INTEREST-RATE-PER-BLOCK)) RATE-PRECISION)
+)
+
+(define-read-only (get-current-btc-price)
+  (match (var-get btc-usd-price)
+    price-data (let (
+        (price (get price price-data))
+        (feed-timestamp (get timestamp price-data))
+        (current-time (var-get system-timestamp))
+        (time-elapsed (- current-time feed-timestamp))
+      )
+      (if (>= time-elapsed PRICE-VALIDITY-WINDOW)
+        ERR-STALE-PRICE-FEED
+        (if (<= price u0)
+          ERR-INVALID-AMOUNT
+          (ok price)
+        )
+      )
+    )
+    ERR-PRICE-FEED-UNAVAILABLE
+  )
+)
+
+;; INTEREST ACCRUAL SYSTEM
+
+(define-private (process-global-interest)
+  (let (
+      (current-block stacks-block-height)
+      (last-accrual (var-get last-interest-accrual))
+      (blocks-elapsed (- current-block last-accrual))
+      (outstanding-debt (var-get global-debt-outstanding))
+      (interest-earned (calculate-accrued-interest outstanding-debt blocks-elapsed))
+    )
+    (if (> blocks-elapsed u0)
+      (begin
+        (var-set protocol-revenue-pool
+          (+ (var-get protocol-revenue-pool) interest-earned)
+        )
+        (var-set global-debt-outstanding (+ outstanding-debt interest-earned))
+        (var-set last-interest-accrual current-block)
+        true
+      )
+      true
+    )
+  )
+)
