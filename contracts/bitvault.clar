@@ -205,3 +205,115 @@
     )
   )
 )
+
+(define-private (update-vault-interest (user principal))
+  (match (map-get? vault-positions user)
+    vault (let (
+        (debt (get usd-debt vault))
+        (collateral (get btc-collateral vault))
+        (last-update (get last-update vault))
+        (blocks-elapsed (- stacks-block-height last-update))
+        (interest-accrued (calculate-accrued-interest debt blocks-elapsed))
+        (updated-debt (+ debt interest-accrued))
+        (updated-vault {
+          btc-collateral: collateral,
+          usd-debt: updated-debt,
+          last-update: stacks-block-height,
+        })
+      )
+      (if (> blocks-elapsed u0)
+        (map-set vault-positions user updated-vault)
+        false
+      )
+      updated-vault
+    )
+    {
+      btc-collateral: u0,
+      usd-debt: u0,
+      last-update: stacks-block-height,
+    }
+  )
+)
+
+;; CORE PROTOCOL OPERATIONS
+
+(define-public (open-vault
+    (btc-collateral uint)
+    (debt-amount uint)
+  )
+  (begin
+    (asserts! (not (var-get emergency-pause)) ERR-PROTOCOL-PAUSED)
+    (asserts! (>= btc-collateral u0) ERR-INVALID-AMOUNT)
+    (asserts! (>= debt-amount MIN-DEBT-AMOUNT) ERR-MINIMUM-DEBT-REQUIRED)
+
+    (let (
+        (btc-price (try! (get-current-btc-price)))
+        (user tx-sender)
+      )
+      (process-global-interest)
+
+      (let (
+          (current-vault (update-vault-interest user))
+          (existing-collateral (get btc-collateral current-vault))
+          (existing-debt (get usd-debt current-vault))
+          (new-total-collateral (+ existing-collateral btc-collateral))
+          (new-total-debt (+ existing-debt debt-amount))
+          (required-collateral (calculate-required-collateral new-total-debt btc-price))
+        )
+        (asserts!
+          (>= (calculate-usd-value new-total-collateral btc-price)
+            required-collateral
+          )
+          ERR-INSUFFICIENT-COLLATERAL
+        )
+
+        (map-set vault-positions user {
+          btc-collateral: new-total-collateral,
+          usd-debt: new-total-debt,
+          last-update: stacks-block-height,
+        })
+
+        (var-set global-collateral-locked
+          (+ (var-get global-collateral-locked) btc-collateral)
+        )
+        (var-set global-debt-outstanding
+          (+ (var-get global-debt-outstanding) debt-amount)
+        )
+
+        (ft-mint? bitvault-usd debt-amount user)
+      )
+    )
+  )
+)
+
+(define-public (deposit-collateral (btc-amount uint))
+  (begin
+    (asserts! (not (var-get emergency-pause)) ERR-PROTOCOL-PAUSED)
+    (asserts! (> btc-amount u0) ERR-INVALID-AMOUNT)
+
+    (let (
+        (user tx-sender)
+        (vault (unwrap! (map-get? vault-positions user) ERR-VAULT-NOT-FOUND))
+      )
+      (process-global-interest)
+
+      (let (
+          (updated-vault (update-vault-interest user))
+          (current-debt (get usd-debt updated-vault))
+          (current-collateral (get btc-collateral updated-vault))
+          (new-collateral (+ current-collateral btc-amount))
+        )
+        (map-set vault-positions user {
+          btc-collateral: new-collateral,
+          usd-debt: current-debt,
+          last-update: stacks-block-height,
+        })
+
+        (var-set global-collateral-locked
+          (+ (var-get global-collateral-locked) btc-amount)
+        )
+        (ok true)
+      )
+    )
+  )
+)
