@@ -418,3 +418,82 @@
         (btc-price (try! (get-current-btc-price)))
       )
       (process-global-interest)
+
+      (let (
+          (updated-vault (update-vault-interest target-user))
+          (debt (get usd-debt updated-vault))
+          (collateral (get btc-collateral updated-vault))
+          (collateral-value (calculate-usd-value collateral btc-price))
+          (liquidation-threshold-value (/ (* debt LIQUIDATION-THRESHOLD) u100))
+        )
+        (asserts! (< collateral-value liquidation-threshold-value)
+          ERR-UNAUTHORIZED
+        )
+
+        (try! (ft-burn? bitvault-usd debt liquidator))
+
+        (let (
+            (liquidation-reward (/ (* collateral LIQUIDATION-BONUS) u100))
+            (protocol-fee (- collateral liquidation-reward))
+          )
+          (var-set global-collateral-locked
+            (- (var-get global-collateral-locked) collateral)
+          )
+          (var-set global-debt-outstanding
+            (- (var-get global-debt-outstanding) debt)
+          )
+          (var-set protocol-revenue-pool
+            (+ (var-get protocol-revenue-pool) protocol-fee)
+          )
+          (map-delete vault-positions target-user)
+          (ok true)
+        )
+      )
+    )
+  )
+)
+
+;; QUERY FUNCTIONS
+
+(define-read-only (get-vault-details (user principal))
+  (map-get? vault-positions user)
+)
+
+(define-read-only (get-collateral-ratio (user principal))
+  (match (map-get? vault-positions user)
+    vault (match (var-get btc-usd-price)
+      price-data (let (
+          (price (get price price-data))
+          (collateral (get btc-collateral vault))
+          (debt (get usd-debt vault))
+        )
+        (if (is-eq debt u0)
+          none
+          (some (/ (* (calculate-usd-value collateral price) u100) debt))
+        )
+      )
+      none
+    )
+    none
+  )
+)
+
+(define-read-only (get-protocol-metrics)
+  {
+    total-debt: (var-get global-debt-outstanding),
+    total-collateral: (var-get global-collateral-locked),
+    revenue-pool: (var-get protocol-revenue-pool),
+    emergency-pause: (var-get emergency-pause),
+    btc-price-feed: (var-get btc-usd-price),
+    last-accrual: (var-get last-interest-accrual),
+  }
+)
+
+(define-read-only (is-vault-liquidatable (user principal))
+  (match (var-get btc-usd-price)
+    price-data (let ((btc-price (get price price-data)))
+      (not (is-vault-healthy user btc-price))
+    )
+    false
+  )
+)
